@@ -91,8 +91,11 @@ class ShellTest extends TestCase
         $this->fail();
     }
 
-    public function testIncludesWithScopeVariables()
+    public function testLoadIncludesWithScopeVariables()
     {
+        $include = TempPaths::file('psysh-test-include-');
+        \file_put_contents($include, '<?php $one = "clobbered"; $fresh = "from include";');
+
         $one = 'banana';
         $two = 123;
         $three = new \stdClass();
@@ -100,21 +103,82 @@ class ShellTest extends TestCase
         $_ = 'ignore this';
         $_e = 'ignore this';
 
-        $config = $this->getConfig(['usePcntl' => false]);
-
-        $shell = new Shell($config);
+        $shell = new Shell($this->getConfig());
         $shell->setScopeVariables(\compact('one', 'two', 'three', '__psysh__', '_', '_e', 'this'));
-        $shell->addInput('exit', true);
-
-        // This is super slow and we shouldn't do this :(
-        $shell->run(null, $this->getOutput());
+        $shell->setIncludes([$include]);
+        $shell->loadIncludes();
 
         $this->assertNotContains('__psysh__', $shell->getScopeVariableNames());
-        $this->assertArrayEquals(['one', 'two', 'three', '_'], $shell->getScopeVariableNames());
+        $this->assertArrayEquals(['one', 'two', 'three', 'fresh', '_'], $shell->getScopeVariableNames());
         $this->assertSame('banana', $shell->getScopeVariable('one'));
         $this->assertSame(123, $shell->getScopeVariable('two'));
         $this->assertSame($three, $shell->getScopeVariable('three'));
+        $this->assertSame('from include', $shell->getScopeVariable('fresh'));
         $this->assertNull($shell->getScopeVariable('_'));
+    }
+
+    public function testLoadIncludesContinuesAfterThrowable()
+    {
+        $invalid = TempPaths::file('psysh-test-include-');
+        $valid = TempPaths::file('psysh-test-include-');
+        \file_put_contents($invalid, '<?php this is not valid PHP;');
+        \file_put_contents($valid, '<?php $included = true;');
+
+        $shell = new class($this->getConfig()) extends Shell {
+            public array $exceptions = [];
+
+            public function writeException(\Throwable $e)
+            {
+                $this->exceptions[] = $e;
+            }
+        };
+        $shell->setIncludes([$invalid, $valid]);
+        $shell->loadIncludes();
+
+        $this->assertCount(1, $shell->exceptions);
+        $this->assertInstanceOf(\ParseError::class, $shell->exceptions[0]);
+        $this->assertTrue($shell->getScopeVariable('included'));
+    }
+
+    public function testLoadIncludesRestoresErrorHandlerAfterFailure()
+    {
+        $shell = new class($this->getConfig()) extends Shell {
+            public function getIncludes(): array
+            {
+                throw new \RuntimeException('Unable to load includes');
+            }
+        };
+
+        $handler = static function () {
+            return true;
+        };
+        \set_error_handler($handler);
+
+        try {
+            $exception = null;
+            try {
+                $shell->loadIncludes();
+            } catch (\Throwable $e) {
+                $exception = $e;
+            }
+
+            $currentHandler = \set_error_handler(static function () {
+                return true;
+            });
+            \restore_error_handler();
+
+            if ($currentHandler !== $handler) {
+                // A regression leaves an extra frame on the handler stack; drop it so this
+                // test's own cleanup still lands where it started.
+                \restore_error_handler();
+            }
+
+            $this->assertInstanceOf(\RuntimeException::class, $exception);
+            $this->assertSame('Unable to load includes', $exception->getMessage());
+            $this->assertSame($handler, $currentHandler);
+        } finally {
+            \restore_error_handler();
+        }
     }
 
     protected function assertArrayEquals(array $expected, array $actual, $message = '')
