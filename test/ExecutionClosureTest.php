@@ -12,6 +12,7 @@
 namespace Psy\Test;
 
 use Psy\Configuration;
+use Psy\Exception\BreakException;
 use Psy\ExecutionLoop\AbstractListener;
 use Psy\Shell;
 use Symfony\Component\Console\Input\ArrayInput;
@@ -19,8 +20,25 @@ use Symfony\Component\Console\Output\BufferedOutput;
 
 class ExecutionClosureTest extends TestCase
 {
+    private ?\Closure $errorHandler = null;
+
     protected function tearDown(): void
     {
+        if ($this->errorHandler !== null) {
+            $currentHandler = \set_error_handler(static function () {
+                return true;
+            });
+            \restore_error_handler();
+
+            if ($currentHandler !== $this->errorHandler) {
+                // Drop the extra handler frame left by a failing loadIncludes() call.
+                \restore_error_handler();
+            }
+
+            \restore_error_handler();
+            $this->errorHandler = null;
+        }
+
         if (\function_exists('readline_clear_history')) {
             \readline_clear_history();
         }
@@ -99,8 +117,85 @@ class ExecutionClosureTest extends TestCase
         $this->assertFalse($shell->isRunActive());
     }
 
+    public function testInteractiveRunSettlesListenersAfterThrowUp()
+    {
+        [$shell, $listener] = $this->getShell([
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_FORCED,
+        ]);
+        $shell->addInput('throw-up new \RuntimeException("failed")', true);
+
+        try {
+            $shell->doRun(new ArrayInput([]), new BufferedOutput());
+            $this->fail('Expected RuntimeException');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('failed', $e->getMessage());
+        }
+
+        $this->assertSame(1, $listener->afterLoopCalls);
+        $this->assertSame(1, $listener->afterRunCalls);
+        $this->assertSame([1], $listener->exitCodes);
+    }
+
+    public function testInteractiveRunRendersListenerFailuresBeforeTeardown()
+    {
+        [$shell, $listener] = $this->getShell([
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_FORCED,
+        ]);
+        $listener->failBeforeLoop = true;
+        $output = new BufferedOutput();
+
+        $this->assertSame(1, $shell->doRun(new ArrayInput([]), $output));
+        $this->assertSame(1, \substr_count($output->fetch(), 'failed before loop'));
+        $this->assertSame(0, $listener->afterLoopCalls);
+        $this->assertSame(1, $listener->afterRunCalls);
+        $this->assertSame([1], $listener->exitCodes);
+    }
+
+    public function testNonInteractiveRunSettlesListenersAfterIncludeFailure()
+    {
+        [$shell, $listener] = $this->getShell([
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
+        ]);
+        $shell->failIncludes = true;
+        $output = new BufferedOutput();
+        $this->errorHandler = static function () {
+            return true;
+        };
+        \set_error_handler($this->errorHandler);
+
+        $this->assertSame(1, $shell->doRun(new ArrayInput([]), $output));
+        $this->assertSame(1, \substr_count($output->fetch(), 'failed include'));
+        $this->assertSame(0, $listener->afterLoopCalls);
+        $this->assertSame(1, $listener->afterRunCalls);
+        $this->assertSame([1], $listener->exitCodes);
+
+        $shell->writeException(new BreakException('finished'));
+        $this->assertStringContainsString('finished', $output->fetch());
+    }
+
+    public function testNonInteractiveRunClearsStateWhenListenerTeardownFails()
+    {
+        [$shell, $listener] = $this->getShell([
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
+        ]);
+        $listener->failAfterRun = true;
+        $shell->addInput('21 * 2', true);
+        $output = new BufferedOutput();
+
+        try {
+            $shell->doRun(new ArrayInput([]), $output);
+            $this->fail('Expected RuntimeException');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('failed after run', $e->getMessage());
+        }
+
+        $output->fetch();
+        $shell->writeException(new BreakException('finished'));
+        $this->assertStringContainsString('finished', $output->fetch());
+    }
+
     /**
-     * @return array{Shell, ExecutionClosureListener}
+     * @return array{ExecutionClosureTestShell, ExecutionClosureListener}
      */
     private function getShell(array $options = []): array
     {
@@ -122,6 +217,10 @@ class ExecutionClosureTest extends TestCase
 class ExecutionClosureListener extends AbstractListener
 {
     public int $afterLoopCalls = 0;
+    public int $afterRunCalls = 0;
+    public array $exitCodes = [];
+    public bool $failAfterRun = false;
+    public bool $failBeforeLoop = false;
     public bool $failBeforeRun = false;
     public int $onExecuteCalls = 0;
     public ?int $outputBufferLevel = null;
@@ -150,6 +249,13 @@ class ExecutionClosureListener extends AbstractListener
         return null;
     }
 
+    public function beforeLoop(Shell $shell)
+    {
+        if ($this->failBeforeLoop) {
+            throw new \RuntimeException('failed before loop');
+        }
+    }
+
     public function afterLoop(Shell $shell)
     {
         $this->afterLoopCalls++;
@@ -160,12 +266,19 @@ class ExecutionClosureListener extends AbstractListener
 
     public function afterRun(Shell $shell, int $exitCode = 0)
     {
+        $this->afterRunCalls++;
+        $this->exitCodes[] = $exitCode;
         $this->runActiveStates[] = $shell->isRunActive();
+
+        if ($this->failAfterRun) {
+            throw new \RuntimeException('failed after run');
+        }
     }
 }
 
 class ExecutionClosureTestShell extends Shell
 {
+    public bool $failIncludes = false;
     private ExecutionClosureListener $listener;
 
     public function __construct(Configuration $config, ExecutionClosureListener $listener)
@@ -178,5 +291,14 @@ class ExecutionClosureTestShell extends Shell
     protected function getDefaultLoopListeners(): array
     {
         return [$this->listener];
+    }
+
+    public function getIncludes(): array
+    {
+        if ($this->failIncludes) {
+            throw new \RuntimeException('failed include');
+        }
+
+        return parent::getIncludes();
     }
 }
