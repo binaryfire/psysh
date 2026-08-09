@@ -97,6 +97,7 @@ class Shell extends Application
     private bool $lastExecSuccess = true;
     private bool $suppressReturnValue = false;
     private bool $nonInteractive = false;
+    private bool $runActive = false;
     private ?int $errorReporting = null;
     private bool $interactiveSignalCharsEnabled = false;
     private bool $outputWritten = false;
@@ -709,12 +710,26 @@ class Shell extends Application
         $this->clearPendingCode();
         $this->warmAutoloader();
 
-        if ($this->config->getInputInteractive()) {
-            // @todo should it be possible to have raw output in an interactive run?
-            return $this->doInteractiveRun();
-        } else {
-            return $this->doNonInteractiveRun($this->config->rawOutput());
+        $this->runActive = true;
+
+        try {
+            if ($this->config->getInputInteractive()) {
+                // @todo should it be possible to have raw output in an interactive run?
+                return $this->doInteractiveRun();
+            } else {
+                return $this->doNonInteractiveRun($this->config->rawOutput());
+            }
+        } finally {
+            $this->runActive = false;
         }
+    }
+
+    /**
+     * Check whether a full shell run is active.
+     */
+    public function isRunActive(): bool
+    {
+        return $this->runActive;
     }
 
     /**
@@ -787,17 +802,21 @@ class Shell extends Application
         $this->beforeRun();
         $this->loadIncludes();
 
-        // For non-interactive execution, read only from the input buffer or from piped input.
-        // Otherwise it'll try to readline and hang, waiting for user input with no indication of
-        // what's holding things up.
-        if (!empty($this->inputBuffer) || $this->config->inputIsPiped()) {
-            $this->getInput(false);
-        }
-
         try {
-            if ($this->hasCode()) {
-                $ret = $this->execute($this->flushCode());
-                $this->writeReturnValue($ret, $rawOutput);
+            try {
+                // For non-interactive execution, read only from the input buffer or from piped input.
+                // Otherwise it'll try to readline and hang, waiting for user input with no indication of
+                // what's holding things up.
+                if (!empty($this->inputBuffer) || $this->config->inputIsPiped()) {
+                    $this->getInput(false);
+                }
+
+                if ($this->hasCode()) {
+                    $ret = $this->execute($this->flushCode());
+                    $this->writeReturnValue($ret, $rawOutput);
+                }
+            } finally {
+                $this->afterLoop();
             }
         } catch (BreakException $e) {
             // User called exit() in non-interactive mode
@@ -1138,7 +1157,8 @@ class Shell extends Application
     private function enableInteractiveSignalCharsIfNeeded(): void
     {
         if (
-            $this->interactiveSignalCharsEnabled
+            !$this->runActive
+            || $this->interactiveSignalCharsEnabled
             || $this->nonInteractive
             || !($this->readline instanceof InteractiveReadlineInterface)
             || $this->hasSigintExecutionListener()
