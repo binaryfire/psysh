@@ -696,7 +696,7 @@ class Shell extends Application
     /**
      * Runs PsySH.
      *
-     * @throws \Throwable if thrown via the `throw-up` command
+     * @throws \Throwable if thrown via the `throw-up` command when process forking is not active
      *
      * @param InputInterface  $input  An Input instance
      * @param OutputInterface $output An Output instance
@@ -738,7 +738,7 @@ class Shell extends Application
      * Initializes tab completion and readline history, then spins up the
      * execution loop.
      *
-     * @throws \Throwable if thrown via the `throw-up` command
+     * @throws \Throwable if thrown via the `throw-up` command when process forking is not active
      *
      * @return int 0 if everything went fine, or an error code
      */
@@ -763,17 +763,31 @@ class Shell extends Application
 
         try {
             $this->beforeRun();
-            $this->loadIncludes();
-            $loop = new ExecutionLoopClosure($this);
-            $exitCode = $loop->execute();
-            $this->afterRun($exitCode ?? 0);
-
-            return $exitCode ?? 0;
-        } catch (ThrowUpException $e) {
-            throw $e->getPrevious();
         } catch (BreakException $e) {
             // The ProcessForker throws a BreakException to finish the main thread.
             return $e->getCode();
+        }
+
+        $exitCode = 1;
+
+        try {
+            $this->loadIncludes();
+            $loop = new ExecutionLoopClosure($this);
+            $exitCode = $loop->execute() ?? 0;
+
+            return $exitCode;
+        } catch (ThrowUpException $e) {
+            throw $e->getPrevious();
+        } catch (BreakException $e) {
+            $exitCode = $e->getCode();
+
+            return $exitCode;
+        } catch (\Throwable $e) {
+            $this->writeException($e);
+
+            return 1;
+        } finally {
+            $this->afterRun($exitCode);
         }
     }
 
@@ -789,8 +803,6 @@ class Shell extends Application
      */
     private function doNonInteractiveRun(bool $rawOutput): int
     {
-        $this->nonInteractive = true;
-
         // If raw output is enabled (or output is piped) we don't want startup messages.
         if (!$rawOutput && !$this->config->outputIsPiped()) {
             $this->output->writeln($this->getHeader());
@@ -800,9 +812,13 @@ class Shell extends Application
         }
 
         $this->beforeRun();
-        $this->loadIncludes();
+
+        $this->nonInteractive = true;
+        $exitCode = 1;
 
         try {
+            $this->loadIncludes();
+
             try {
                 // For non-interactive execution, read only from the input buffer or from piped input.
                 // Otherwise it'll try to readline and hang, waiting for user input with no indication of
@@ -818,18 +834,26 @@ class Shell extends Application
             } finally {
                 $this->afterLoop();
             }
+
+            $exitCode = 0;
+
+            return 0;
         } catch (BreakException $e) {
             // User called exit() in non-interactive mode
-            $this->afterRun($e->getCode());
-            $this->nonInteractive = false;
+            $exitCode = $e->getCode();
 
-            return $e->getCode();
+            return $exitCode;
+        } catch (\Throwable $e) {
+            $this->writeException($e);
+
+            return 1;
+        } finally {
+            try {
+                $this->afterRun($exitCode);
+            } finally {
+                $this->nonInteractive = false;
+            }
         }
-
-        $this->afterRun(0);
-        $this->nonInteractive = false;
-
-        return 0;
     }
 
     /**
