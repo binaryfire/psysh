@@ -836,14 +836,17 @@ class Shell extends Application
         // Load user-defined includes
         $load = function (self $__psysh__) {
             \set_error_handler([$__psysh__, 'handleError']);
-            foreach ($__psysh__->getIncludes() as $__psysh_include__) {
-                try {
-                    include_once $__psysh_include__;
-                } catch (\Exception $_e) {
-                    $__psysh__->writeException($_e);
+            try {
+                foreach ($__psysh__->getIncludes() as $__psysh_include__) {
+                    try {
+                        include_once $__psysh_include__;
+                    } catch (\Throwable $_e) {
+                        $__psysh__->writeException($_e);
+                    }
                 }
+            } finally {
+                \restore_error_handler();
             }
-            \restore_error_handler();
             unset($__psysh_include__);
 
             // Override any new local variables with pre-defined scope variables
