@@ -91,7 +91,7 @@ class ShellTest extends TestCase
         $this->fail();
     }
 
-    public function testLoadIncludesWithScopeVariables()
+    public function testIncludesWithScopeVariables()
     {
         $include = TempPaths::file('psysh-test-include-');
         \file_put_contents($include, '<?php $one = "clobbered"; $fresh = "from include";');
@@ -103,10 +103,15 @@ class ShellTest extends TestCase
         $_ = 'ignore this';
         $_e = 'ignore this';
 
-        $shell = new Shell($this->getConfig());
+        $config = $this->getConfig([
+            'usePcntl'        => false,
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
+        ]);
+        $shell = new Shell($config);
         $shell->setScopeVariables(\compact('one', 'two', 'three', '__psysh__', '_', '_e', 'this'));
         $shell->setIncludes([$include]);
-        $shell->loadIncludes();
+        $shell->addInput('exit', true);
+        $shell->run(null, $this->getOutput());
 
         $this->assertNotContains('__psysh__', $shell->getScopeVariableNames());
         $this->assertArrayEquals(['one', 'two', 'three', 'fresh', '_'], $shell->getScopeVariableNames());
@@ -117,14 +122,18 @@ class ShellTest extends TestCase
         $this->assertNull($shell->getScopeVariable('_'));
     }
 
-    public function testLoadIncludesContinuesAfterThrowable()
+    public function testIncludesContinueAfterThrowable()
     {
         $invalid = TempPaths::file('psysh-test-include-');
         $valid = TempPaths::file('psysh-test-include-');
         \file_put_contents($invalid, '<?php this is not valid PHP;');
         \file_put_contents($valid, '<?php $included = true;');
 
-        $shell = new class($this->getConfig()) extends Shell {
+        $config = $this->getConfig([
+            'usePcntl'        => false,
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
+        ]);
+        $shell = new class($config) extends Shell {
             public array $exceptions = [];
 
             public function writeException(\Throwable $e)
@@ -133,21 +142,7 @@ class ShellTest extends TestCase
             }
         };
         $shell->setIncludes([$invalid, $valid]);
-        $shell->loadIncludes();
-
-        $this->assertCount(1, $shell->exceptions);
-        $this->assertInstanceOf(\ParseError::class, $shell->exceptions[0]);
-        $this->assertTrue($shell->getScopeVariable('included'));
-    }
-
-    public function testLoadIncludesRestoresErrorHandlerAfterFailure()
-    {
-        $shell = new class($this->getConfig()) extends Shell {
-            public function getIncludes(): array
-            {
-                throw new \RuntimeException('Unable to load includes');
-            }
-        };
+        $shell->addInput('exit', true);
 
         $handler = static function () {
             return true;
@@ -155,12 +150,7 @@ class ShellTest extends TestCase
         \set_error_handler($handler);
 
         try {
-            $exception = null;
-            try {
-                $shell->loadIncludes();
-            } catch (\Throwable $e) {
-                $exception = $e;
-            }
+            $status = $shell->run(null, $this->getOutput());
 
             $currentHandler = \set_error_handler(static function () {
                 return true;
@@ -173,8 +163,58 @@ class ShellTest extends TestCase
                 \restore_error_handler();
             }
 
-            $this->assertInstanceOf(\RuntimeException::class, $exception);
-            $this->assertSame('Unable to load includes', $exception->getMessage());
+            $this->assertSame(0, $status);
+            $this->assertCount(1, $shell->exceptions);
+            $this->assertInstanceOf(\ParseError::class, $shell->exceptions[0]);
+            $this->assertTrue($shell->getScopeVariable('included'));
+            $this->assertSame($handler, $currentHandler);
+        } finally {
+            \restore_error_handler();
+        }
+    }
+
+    public function testIncludesRestoreErrorHandlerAfterFailure()
+    {
+        $config = $this->getConfig([
+            'usePcntl'        => false,
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
+        ]);
+        $shell = new class($config) extends Shell {
+            public array $exceptions = [];
+
+            public function getIncludes(): array
+            {
+                throw new \RuntimeException('Unable to load includes');
+            }
+
+            public function writeException(\Throwable $e)
+            {
+                $this->exceptions[] = $e;
+            }
+        };
+
+        $handler = static function () {
+            return true;
+        };
+        \set_error_handler($handler);
+
+        try {
+            $status = $shell->run(null, $this->getOutput());
+
+            $currentHandler = \set_error_handler(static function () {
+                return true;
+            });
+            \restore_error_handler();
+
+            if ($currentHandler !== $handler) {
+                // A regression leaves an extra frame on the handler stack; drop it so this
+                // test's own cleanup still lands where it started.
+                \restore_error_handler();
+            }
+
+            $this->assertSame(1, $status);
+            $this->assertCount(1, $shell->exceptions);
+            $this->assertInstanceOf(\RuntimeException::class, $shell->exceptions[0]);
             $this->assertSame($handler, $currentHandler);
         } finally {
             \restore_error_handler();
