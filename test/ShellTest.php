@@ -122,6 +122,26 @@ class ShellTest extends TestCase
         $this->assertNull($shell->getScopeVariable('_'));
     }
 
+    public function testShellExtensionsCanLoadIncludesBeforeDirectExecution()
+    {
+        $include = TempPaths::file('psysh-test-include-');
+        \file_put_contents($include, '<?php $greeting = "hello from include";');
+
+        $shell = new class($this->getConfig()) extends Shell {
+            public function executeWithIncludes(string $code, OutputInterface $output)
+            {
+                $this->setOutput($output);
+                $this->boot();
+                $this->loadIncludes();
+
+                return $this->execute($code, true);
+            }
+        };
+        $shell->setIncludes([$include]);
+
+        $this->assertSame('hello from include', $shell->executeWithIncludes('return $greeting;', $this->getOutput()));
+    }
+
     public function testIncludesContinueAfterThrowable()
     {
         $invalid = TempPaths::file('psysh-test-include-');

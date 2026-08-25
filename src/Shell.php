@@ -830,8 +830,10 @@ class Shell extends Application
 
     /**
      * Load user-defined includes.
+     *
+     * The shell output must be configured first; otherwise, reporting an include failure will abort loading.
      */
-    private function loadIncludes()
+    protected function loadIncludes()
     {
         // Load user-defined includes
         $load = function (self $__psysh__) {
