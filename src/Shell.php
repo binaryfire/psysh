@@ -97,6 +97,7 @@ class Shell extends Application
     private bool $lastExecSuccess = true;
     private bool $suppressReturnValue = false;
     private bool $nonInteractive = false;
+    private int $executionDepth = 0;
     private ?int $errorReporting = null;
     private bool $interactiveSignalCharsEnabled = false;
     private bool $outputWritten = false;
@@ -709,11 +710,18 @@ class Shell extends Application
         $this->clearPendingCode();
         $this->warmAutoloader();
 
-        if ($this->config->getInputInteractive()) {
-            // @todo should it be possible to have raw output in an interactive run?
-            return $this->doInteractiveRun();
-        } else {
-            return $this->doNonInteractiveRun($this->config->rawOutput());
+        // Treat the whole run as one execution, so nested execute() calls don't reload includes.
+        $this->executionDepth++;
+
+        try {
+            if ($this->config->getInputInteractive()) {
+                // @todo should it be possible to have raw output in an interactive run?
+                return $this->doInteractiveRun();
+            } else {
+                return $this->doNonInteractiveRun($this->config->rawOutput());
+            }
+        } finally {
+            $this->executionDepth--;
         }
     }
 
@@ -748,7 +756,9 @@ class Shell extends Application
 
         try {
             $this->beforeRun();
-            $this->loadIncludes();
+            if ($this->executionDepth === 1) {
+                $this->loadIncludes();
+            }
             $loop = new ExecutionLoopClosure($this);
             $exitCode = $loop->execute();
             $this->afterRun($exitCode ?? 0);
@@ -785,7 +795,9 @@ class Shell extends Application
         }
 
         $this->beforeRun();
-        $this->loadIncludes();
+        if ($this->executionDepth === 1) {
+            $this->loadIncludes();
+        }
 
         // For non-interactive execution, read only from the input buffer or from piped input.
         // Otherwise it'll try to readline and hang, waiting for user input with no indication of
@@ -833,7 +845,7 @@ class Shell extends Application
      *
      * The shell output must be configured first; otherwise, reporting an include failure will abort loading.
      */
-    protected function loadIncludes()
+    private function loadIncludes()
     {
         // Load user-defined includes
         $load = function (self $__psysh__) {
@@ -1330,7 +1342,7 @@ class Shell extends Application
     }
 
     /**
-     * Add includes, to be parsed and executed before running the interactive shell.
+     * Add includes to be parsed and executed before the outermost shell execution.
      *
      * @param array $includes
      */
@@ -1340,7 +1352,7 @@ class Shell extends Application
     }
 
     /**
-     * Get PHP files to be parsed and executed before running the interactive shell.
+     * Get PHP files to be parsed and executed before the outermost shell execution.
      *
      * @return string[]
      */
@@ -2208,6 +2220,9 @@ class Shell extends Application
     /**
      * Execute code in the shell execution context.
      *
+     * Configured includes are loaded before the outermost execution. The shell
+     * output must be configured first so include failures can be reported.
+     *
      * @param string $code
      * @param bool   $throwExceptions
      *
@@ -2217,25 +2232,35 @@ class Shell extends Application
     {
         $this->boot();
 
-        $this->setCode($code, true);
-
-        if ($logger = $this->config->getLogger()) {
-            $logger->logExecute($code);
-        }
-
-        $closure = new ExecutionClosure($this);
-
-        if ($throwExceptions) {
-            return $closure->execute();
-        }
+        $this->executionDepth++;
 
         try {
-            return $closure->execute();
-        } catch (BreakException $_e) {
-            // Re-throw BreakException so it can propagate exit codes
-            throw $_e;
-        } catch (\Throwable $_e) {
-            $this->writeException($_e);
+            if ($this->executionDepth === 1) {
+                $this->loadIncludes();
+            }
+
+            $this->setCode($code, true);
+
+            if ($logger = $this->config->getLogger()) {
+                $logger->logExecute($code);
+            }
+
+            $closure = new ExecutionClosure($this);
+
+            if ($throwExceptions) {
+                return $closure->execute();
+            }
+
+            try {
+                return $closure->execute();
+            } catch (BreakException $_e) {
+                // Re-throw BreakException so it can propagate exit codes
+                throw $_e;
+            } catch (\Throwable $_e) {
+                $this->writeException($_e);
+            }
+        } finally {
+            $this->executionDepth--;
         }
     }
 
