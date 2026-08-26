@@ -122,6 +122,89 @@ class ShellTest extends TestCase
         $this->assertNull($shell->getScopeVariable('_'));
     }
 
+    public function testExecuteLoadsIncludesOnlyOnceAcrossNestedExecutions()
+    {
+        $include = TempPaths::file('psysh-test-include-');
+        \file_put_contents($include, '<?php $included = true;');
+
+        $shell = new class($this->getConfig()) extends Shell {
+            public int $includeReads = 0;
+
+            public function getIncludes(): array
+            {
+                $this->includeReads++;
+
+                return parent::getIncludes();
+            }
+        };
+        $shell->setOutput($this->getOutput());
+        $shell->setIncludes([$include]);
+        $shell->setScopeVariables(['shell' => $shell]);
+
+        $result = $shell->execute('return [$included, $shell->execute("return 42;", true)];', true);
+
+        $this->assertSame([true, 42], $result);
+        $this->assertSame(1, $shell->includeReads);
+    }
+
+    public function testRunDoesNotReloadIncludesForNestedCommands()
+    {
+        $include = TempPaths::file('psysh-test-include-');
+        \file_put_contents($include, '<?php $included = true;');
+
+        $config = $this->getConfig([
+            'usePcntl'        => false,
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
+        ]);
+        $shell = new class($config) extends Shell {
+            public int $includeReads = 0;
+
+            public function getIncludes(): array
+            {
+                $this->includeReads++;
+
+                return parent::getIncludes();
+            }
+        };
+        $shell->setIncludes([$include]);
+        $shell->addInput('timeit 1 + 1', true);
+        $shell->addInput('exit', true);
+
+        $shell->run(null, $this->getOutput());
+
+        $this->assertSame(2, $shell->getScopeVariable('_'));
+        $this->assertSame(1, $shell->includeReads);
+    }
+
+    public function testIncludesLoadOnlyOnceWhenEvaluatedCodeReentersRun()
+    {
+        $include = TempPaths::file('psysh-test-include-');
+        \file_put_contents($include, '<?php $included = true;');
+
+        $config = $this->getConfig([
+            'usePcntl'        => false,
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
+        ]);
+        $shell = new class($config) extends Shell {
+            public int $includeReads = 0;
+
+            public function getIncludes(): array
+            {
+                $this->includeReads++;
+
+                return parent::getIncludes();
+            }
+        };
+        $output = $this->getOutput();
+        $shell->setOutput($output);
+        $shell->setIncludes([$include]);
+        $shell->setScopeVariables(['shell' => $shell, 'output' => $output]);
+        $shell->addInput('exit', true);
+
+        $this->assertSame(0, $shell->execute('return $shell->run(null, $output);', true));
+        $this->assertSame(1, $shell->includeReads);
+    }
+
     public function testIncludesContinueAfterThrowable()
     {
         $invalid = TempPaths::file('psysh-test-include-');
