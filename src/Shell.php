@@ -98,6 +98,7 @@ class Shell extends Application
     private bool $suppressReturnValue = false;
     private bool $nonInteractive = false;
     private bool $runActive = false;
+    private int $executionDepth = 0;
     private ?int $errorReporting = null;
     private bool $interactiveSignalCharsEnabled = false;
     private bool $outputWritten = false;
@@ -712,6 +713,9 @@ class Shell extends Application
 
         $this->runActive = true;
 
+        // Treat the whole run as one execution, so nested execute() calls don't reload includes.
+        $this->executionDepth++;
+
         try {
             if ($this->config->getInputInteractive()) {
                 // @todo should it be possible to have raw output in an interactive run?
@@ -720,6 +724,7 @@ class Shell extends Application
                 return $this->doNonInteractiveRun($this->config->rawOutput());
             }
         } finally {
+            $this->executionDepth--;
             $this->runActive = false;
         }
     }
@@ -763,7 +768,9 @@ class Shell extends Application
 
         try {
             $this->beforeRun();
-            $this->loadIncludes();
+            if ($this->executionDepth === 1) {
+                $this->loadIncludes();
+            }
             $loop = new ExecutionLoopClosure($this);
             $exitCode = $loop->execute();
             $this->afterRun($exitCode ?? 0);
@@ -800,7 +807,9 @@ class Shell extends Application
         }
 
         $this->beforeRun();
-        $this->loadIncludes();
+        if ($this->executionDepth === 1) {
+            $this->loadIncludes();
+        }
 
         try {
             try {
@@ -849,20 +858,25 @@ class Shell extends Application
 
     /**
      * Load user-defined includes.
+     *
+     * The shell output must be configured first; otherwise, reporting an include failure will abort loading.
      */
     private function loadIncludes()
     {
         // Load user-defined includes
         $load = function (self $__psysh__) {
             \set_error_handler([$__psysh__, 'handleError']);
-            foreach ($__psysh__->getIncludes() as $__psysh_include__) {
-                try {
-                    include_once $__psysh_include__;
-                } catch (\Exception $_e) {
-                    $__psysh__->writeException($_e);
+            try {
+                foreach ($__psysh__->getIncludes() as $__psysh_include__) {
+                    try {
+                        include_once $__psysh_include__;
+                    } catch (\Throwable $_e) {
+                        $__psysh__->writeException($_e);
+                    }
                 }
+            } finally {
+                \restore_error_handler();
             }
-            \restore_error_handler();
             unset($__psysh_include__);
 
             // Override any new local variables with pre-defined scope variables
@@ -1345,7 +1359,7 @@ class Shell extends Application
     }
 
     /**
-     * Add includes, to be parsed and executed before running the interactive shell.
+     * Add includes to be parsed and executed before the outermost shell execution.
      *
      * @param array $includes
      */
@@ -1355,7 +1369,7 @@ class Shell extends Application
     }
 
     /**
-     * Get PHP files to be parsed and executed before running the interactive shell.
+     * Get PHP files to be parsed and executed before the outermost shell execution.
      *
      * @return string[]
      */
@@ -2223,6 +2237,9 @@ class Shell extends Application
     /**
      * Execute code in the shell execution context.
      *
+     * Configured includes are loaded before the outermost execution. The shell
+     * output must be configured first so include failures can be reported.
+     *
      * @param string $code
      * @param bool   $throwExceptions
      *
@@ -2232,25 +2249,35 @@ class Shell extends Application
     {
         $this->boot();
 
-        $this->setCode($code, true);
-
-        if ($logger = $this->config->getLogger()) {
-            $logger->logExecute($code);
-        }
-
-        $closure = new ExecutionClosure($this);
-
-        if ($throwExceptions) {
-            return $closure->execute();
-        }
+        $this->executionDepth++;
 
         try {
-            return $closure->execute();
-        } catch (BreakException $_e) {
-            // Re-throw BreakException so it can propagate exit codes
-            throw $_e;
-        } catch (\Throwable $_e) {
-            $this->writeException($_e);
+            if ($this->executionDepth === 1) {
+                $this->loadIncludes();
+            }
+
+            $this->setCode($code, true);
+
+            if ($logger = $this->config->getLogger()) {
+                $logger->logExecute($code);
+            }
+
+            $closure = new ExecutionClosure($this);
+
+            if ($throwExceptions) {
+                return $closure->execute();
+            }
+
+            try {
+                return $closure->execute();
+            } catch (BreakException $_e) {
+                // Re-throw BreakException so it can propagate exit codes
+                throw $_e;
+            } catch (\Throwable $_e) {
+                $this->writeException($_e);
+            }
+        } finally {
+            $this->executionDepth--;
         }
     }
 
