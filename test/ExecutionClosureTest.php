@@ -56,6 +56,16 @@ class ExecutionClosureTest extends TestCase
         $this->assertSame([false, false], $listener->runActiveStates);
     }
 
+    public function testNestedDirectExecutionSettlesListenersOnce()
+    {
+        [$shell, $listener] = $this->getShell();
+        $shell->setScopeVariables(['shell' => $shell]);
+
+        $this->assertSame([1, 2], $shell->execute('return [1, $shell->execute("return 2;", true)];', true));
+        $this->assertSame(2, $listener->onExecuteCalls);
+        $this->assertSame(1, $listener->afterLoopCalls);
+    }
+
     public function testFullRunOwnsRunStateForItsCompleteLifecycle()
     {
         [$shell, $listener] = $this->getShell([

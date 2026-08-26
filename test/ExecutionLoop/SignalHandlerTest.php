@@ -93,6 +93,30 @@ class SignalHandlerTest extends TestCase
     /**
      * @dataProvider asyncSignalsModes
      */
+    public function testNestedDirectExecutionKeepsOuterSignalState(bool $asyncSignals)
+    {
+        $shell = $this->getShell();
+        $handler = static function (): void {
+        };
+        \pcntl_signal(\SIGINT, $handler);
+        \pcntl_async_signals($asyncSignals);
+        $shell->setScopeVariables(['shell' => $shell]);
+
+        $result = $shell->execute(
+            '$installed = \pcntl_signal_get_handler(\SIGINT);'
+            .'$shell->execute("return 2;", true);'
+            .'return [$installed === \pcntl_signal_get_handler(\SIGINT), \pcntl_async_signals()];',
+            true
+        );
+
+        $this->assertSame([true, true], $result);
+        $this->assertSame($handler, \pcntl_signal_get_handler(\SIGINT));
+        $this->assertSame($asyncSignals, \pcntl_async_signals());
+    }
+
+    /**
+     * @dataProvider asyncSignalsModes
+     */
     public function testNonInteractiveRunRestoresSignalState(bool $asyncSignals)
     {
         $shell = $this->getShell([

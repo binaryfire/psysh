@@ -1037,10 +1037,14 @@ class Shell extends Application
     }
 
     /**
-     * Run execution loop listeners after each loop.
+     * Run execution loop listeners after the outermost execution.
      */
     public function afterLoop()
     {
+        if ($this->executionDepth > 1) {
+            return;
+        }
+
         $this->disableInteractiveSignalCharsIfNeeded();
 
         foreach (\array_reverse($this->loopListeners) as $listener) {

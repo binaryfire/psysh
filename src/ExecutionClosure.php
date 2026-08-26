@@ -60,10 +60,7 @@ class ExecutionClosure
 
                 return $_;
             } finally {
-                // Full shell runs settle listeners at their outer loop boundary.
-                if (!$__psysh__->isRunActive()) {
-                    $__psysh__->afterLoop();
-                }
+                $__psysh__->afterLoop();
             }
         });
     }
