@@ -60,7 +60,7 @@ class ExecutionClosure
 
                 return $_;
             } finally {
-                $__psysh__->afterLoop();
+                $__psysh__->afterExecute();
             }
         });
     }

@@ -97,7 +97,7 @@ class Shell extends Application
     private bool $lastExecSuccess = true;
     private bool $suppressReturnValue = false;
     private bool $nonInteractive = false;
-    private bool $runActive = false;
+    private int $runDepth = 0;
     private int $executionDepth = 0;
     private ?int $errorReporting = null;
     private bool $interactiveSignalCharsEnabled = false;
@@ -711,7 +711,7 @@ class Shell extends Application
         $this->clearPendingCode();
         $this->warmAutoloader();
 
-        $this->runActive = true;
+        $this->runDepth++;
 
         // Treat the whole run as one execution, so nested execute() calls don't reload includes.
         $this->executionDepth++;
@@ -725,7 +725,7 @@ class Shell extends Application
             }
         } finally {
             $this->executionDepth--;
-            $this->runActive = false;
+            $this->runDepth--;
         }
     }
 
@@ -734,7 +734,7 @@ class Shell extends Application
      */
     public function isRunActive(): bool
     {
-        return $this->runActive;
+        return $this->runDepth > 0;
     }
 
     /**
@@ -811,21 +811,17 @@ class Shell extends Application
             $this->loadIncludes();
         }
 
-        try {
-            try {
-                // For non-interactive execution, read only from the input buffer or from piped input.
-                // Otherwise it'll try to readline and hang, waiting for user input with no indication of
-                // what's holding things up.
-                if (!empty($this->inputBuffer) || $this->config->inputIsPiped()) {
-                    $this->getInput(false);
-                }
+        // For non-interactive execution, read only from the input buffer or from piped input.
+        // Otherwise it'll try to readline and hang, waiting for user input with no indication of
+        // what's holding things up.
+        if (!empty($this->inputBuffer) || $this->config->inputIsPiped()) {
+            $this->getInput(false);
+        }
 
-                if ($this->hasCode()) {
-                    $ret = $this->execute($this->flushCode());
-                    $this->writeReturnValue($ret, $rawOutput);
-                }
-            } finally {
-                $this->afterLoop();
+        try {
+            if ($this->hasCode()) {
+                $ret = $this->execute($this->flushCode());
+                $this->writeReturnValue($ret, $rawOutput);
             }
         } catch (BreakException $e) {
             // User called exit() in non-interactive mode
@@ -1037,14 +1033,20 @@ class Shell extends Application
     }
 
     /**
-     * Run execution loop listeners after the outermost execution.
+     * Run execution loop listeners after executing user code.
+     */
+    public function afterExecute()
+    {
+        foreach (\array_reverse($this->loopListeners) as $listener) {
+            $listener->afterExecute($this);
+        }
+    }
+
+    /**
+     * Run execution loop listeners after each loop.
      */
     public function afterLoop()
     {
-        if ($this->executionDepth > 1) {
-            return;
-        }
-
         $this->disableInteractiveSignalCharsIfNeeded();
 
         foreach (\array_reverse($this->loopListeners) as $listener) {
@@ -1175,7 +1177,7 @@ class Shell extends Application
     private function enableInteractiveSignalCharsIfNeeded(): void
     {
         if (
-            !$this->runActive
+            $this->runDepth < 1
             || $this->interactiveSignalCharsEnabled
             || $this->nonInteractive
             || !($this->readline instanceof InteractiveReadlineInterface)

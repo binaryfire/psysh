@@ -20,6 +20,7 @@ use Psy\Util\DependencyChecker;
  */
 class SignalHandler extends AbstractListener
 {
+    private int $executionDepth = 0;
     private bool $sigintHandlerInstalled = false;
     private bool $restoreStty = false;
     private bool $wasInterrupted = false;
@@ -63,9 +64,10 @@ class SignalHandler extends AbstractListener
     public function onExecute(Shell $shell, string $code)
     {
         $this->wasInterrupted = false;
+        $this->executionDepth++;
 
-        // Nested executions share the signal state owned by their outer loop.
-        if ($this->originalAsyncSignals === null) {
+        // Nested executions share the signal state owned by their outer execution.
+        if ($this->executionDepth === 1) {
             $this->originalSigintHandler = \pcntl_signal_get_handler(\SIGINT);
             $this->originalAsyncSignals = \pcntl_async_signals();
 
@@ -89,12 +91,18 @@ class SignalHandler extends AbstractListener
     }
 
     /**
-     * Called at the end of each loop.
+     * Restore signal state after executing user code.
      *
      * Restores terminal state and clears stdin if execution was interrupted.
      */
-    public function afterLoop(Shell $shell)
+    public function afterExecute(Shell $shell)
     {
+        $this->executionDepth--;
+
+        if ($this->executionDepth > 0) {
+            return;
+        }
+
         // Restore the SIGINT handler and async mode from before execution
         if ($this->sigintHandlerInstalled) {
             \pcntl_signal(\SIGINT, $this->originalSigintHandler);

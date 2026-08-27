@@ -127,7 +127,6 @@ class SignalHandlerTest extends TestCase
         \pcntl_signal(\SIGINT, $handler);
         \pcntl_async_signals($asyncSignals);
         $shell->addInput('timeit -n3 1 + 1', true);
-        $shell->addInput('exit', true);
 
         $this->assertSame(0, $shell->doRun(new ArrayInput([]), new BufferedOutput()));
         $this->assertSame($handler, \pcntl_signal_get_handler(\SIGINT));

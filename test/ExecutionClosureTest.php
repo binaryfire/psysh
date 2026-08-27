@@ -12,6 +12,7 @@
 namespace Psy\Test;
 
 use Psy\Configuration;
+use Psy\ExecutionLoopClosure;
 use Psy\ExecutionLoop\AbstractListener;
 use Psy\Shell;
 use Symfony\Component\Console\Input\ArrayInput;
@@ -28,18 +29,19 @@ class ExecutionClosureTest extends TestCase
         parent::tearDown();
     }
 
-    public function testAfterLoopRunsAfterSuccessfulExecutionIsSettled()
+    public function testAfterExecuteRunsAfterSuccessfulExecutionIsSettled()
     {
         [$shell, $listener] = $this->getShell();
 
         $this->assertSame(42, $shell->execute('echo "hello"; $answer = 42; $answer', true));
-        $this->assertSame(1, $listener->afterLoopCalls);
+        $this->assertSame(1, $listener->afterExecuteCalls);
+        $this->assertSame(0, $listener->afterLoopCalls);
         $this->assertSame(42, $listener->scopeVariables['answer']);
         $this->assertSame('hello', $listener->scopeVariables['__out']);
         $this->assertSame([false, false], $listener->runActiveStates);
     }
 
-    public function testAfterLoopRunsAfterFailedExecutionIsCleanedUp()
+    public function testAfterExecuteRunsAfterFailedExecutionIsCleanedUp()
     {
         [$shell, $listener] = $this->getShell();
         $outputBufferLevel = \ob_get_level();
@@ -51,19 +53,36 @@ class ExecutionClosureTest extends TestCase
             $this->assertSame('failed', $e->getMessage());
         }
 
-        $this->assertSame(1, $listener->afterLoopCalls);
+        $this->assertSame(1, $listener->afterExecuteCalls);
+        $this->assertSame(0, $listener->afterLoopCalls);
         $this->assertSame($outputBufferLevel, $listener->outputBufferLevel);
         $this->assertSame([false, false], $listener->runActiveStates);
     }
 
-    public function testNestedDirectExecutionSettlesListenersOnce()
+    public function testNestedDirectExecutionPairsExecutionCallbacks()
     {
         [$shell, $listener] = $this->getShell();
         $shell->setScopeVariables(['shell' => $shell]);
 
         $this->assertSame([1, 2], $shell->execute('return [1, $shell->execute("return 2;", true)];', true));
         $this->assertSame(2, $listener->onExecuteCalls);
-        $this->assertSame(1, $listener->afterLoopCalls);
+        $this->assertSame(2, $listener->afterExecuteCalls);
+        $this->assertSame(0, $listener->afterLoopCalls);
+    }
+
+    public function testExecutionLoopPairsExecutionCallbacksWithoutChangingLoopCallbacks()
+    {
+        [$shell, $listener] = $this->getShell();
+        $shell->addInput('42', true);
+        $shell->addInput('exit', true);
+
+        $loop = new ExecutionLoopClosure($shell);
+
+        $this->assertSame(0, $loop->execute());
+        $this->assertSame(1, $listener->onExecuteCalls);
+        $this->assertSame(1, $listener->afterExecuteCalls);
+        $this->assertSame(2, $listener->afterLoopCalls);
+        $this->assertSame(42, $listener->scopeVariables['_']);
     }
 
     public function testFullRunOwnsRunStateForItsCompleteLifecycle()
@@ -78,17 +97,31 @@ class ExecutionClosureTest extends TestCase
         $this->assertFalse($shell->isRunActive());
     }
 
-    public function testFullRunSettlesNestedExecutionsOnce()
+    public function testFullRunPairsNestedExecutionCallbacksWithoutLoopCallbacks()
     {
         [$shell, $listener] = $this->getShell([
             'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
         ]);
         $shell->addInput('timeit -n3 1 + 1', true);
-        $shell->addInput('exit', true);
 
         $this->assertSame(0, $shell->doRun(new ArrayInput([]), new BufferedOutput()));
         $this->assertSame(3, $listener->onExecuteCalls);
-        $this->assertSame(1, $listener->afterLoopCalls);
+        $this->assertSame(3, $listener->afterExecuteCalls);
+        $this->assertSame(0, $listener->afterLoopCalls);
+    }
+
+    public function testNestedFullRunKeepsOuterRunActive()
+    {
+        [$shell] = $this->getShell([
+            'interactiveMode' => Configuration::INTERACTIVE_MODE_DISABLED,
+        ]);
+        $output = new BufferedOutput();
+        $shell->setScopeVariables(['shell' => $shell, 'output' => $output]);
+        $shell->addInput('[$shell->run(null, $output), $shell->isRunActive()]', true);
+
+        $this->assertSame(0, $shell->doRun(new ArrayInput([]), $output));
+        $this->assertSame([0, true], $shell->getScopeVariable('_'));
+        $this->assertFalse($shell->isRunActive());
     }
 
     public function testFullRunReleasesRunStateAfterFailure()
@@ -131,6 +164,7 @@ class ExecutionClosureTest extends TestCase
 
 class ExecutionClosureListener extends AbstractListener
 {
+    public int $afterExecuteCalls = 0;
     public int $afterLoopCalls = 0;
     public bool $failBeforeRun = false;
     public int $onExecuteCalls = 0;
@@ -160,11 +194,17 @@ class ExecutionClosureListener extends AbstractListener
         return null;
     }
 
+    public function afterExecute(Shell $shell)
+    {
+        $this->afterExecuteCalls++;
+        $this->outputBufferLevel = \ob_get_level();
+        $this->scopeVariables = $shell->getScopeVariables();
+        $this->runActiveStates[] = $shell->isRunActive();
+    }
+
     public function afterLoop(Shell $shell)
     {
         $this->afterLoopCalls++;
-        $this->outputBufferLevel = \ob_get_level();
-        $this->scopeVariables = $shell->getScopeVariables();
         $this->runActiveStates[] = $shell->isRunActive();
     }
 
