@@ -12,8 +12,8 @@
 namespace Psy\Test;
 
 use Psy\Configuration;
-use Psy\ExecutionLoopClosure;
 use Psy\ExecutionLoop\AbstractListener;
+use Psy\ExecutionLoopClosure;
 use Psy\Shell;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\BufferedOutput;
